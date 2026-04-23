@@ -8,33 +8,45 @@ FILE: /package.json
 PURPOSE: Defines project dependencies, scripts, and basic metadata.
 CODE:
 {
-  "name": "player_one_coop",
+  "name": "react-example",
   "private": true,
-  "version": "2.0.0",
+  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
+    "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@google/genai": "^1.29.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
     "clsx": "^2.1.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
     "firebase": "^12.12.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.5.0",
+    "vite": "^6.2.0",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.1.14",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.0.4",
+    "@eslint/js": "^10.0.1",
+    "@firebase/eslint-plugin-security-rules": "^0.0.2",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^10.2.1",
+    "globals": "^17.5.0",
     "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
     "typescript": "~5.8.2",
+    "typescript-eslint": "^8.59.0",
     "vite": "^6.2.0"
   }
 }
@@ -43,71 +55,333 @@ CODE:
 FILE: /vite.config.ts
 PURPOSE: Configuration for the Vite build tool, including Tailwind CSS integration and relative base path for GitHub Pages deployment.
 CODE:
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+import {defineConfig, loadEnv} from 'vite';
 
-export default defineConfig({
-  base: '/coop/',
-  plugins: [react(), tailwindcss()],
+export default defineConfig(({mode}) => {
+  const env = loadEnv(mode, '.', '');
+  return {
+    base: './',
+    plugins: [react(), tailwindcss()],
+    define: {
+      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+    },
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, '.'),
+      },
+    },
+    server: {
+      hmr: process.env.DISABLE_HMR !== 'true',
+    },
+  };
 });
 
 ---------------------------------------------------
 FILE: /firestore.rules
-PURPOSE: Security rules for Cloud Firestore (currently relaxed for testing).
+PURPOSE: Security rules for Cloud Firestore to protect user data and ensure data integrity.
 CODE:
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
+    }
+
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    
+    function isValidUser(data) {
+      return data.keys().hasAll(['xp', 'level', 'createdAt', 'updatedAt']) 
+        && data.keys().size() == 4
+        && data.xp is number && data.xp >= 0
+        && data.level is number && data.level >= 1
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidReflection(data) {
+      return data.keys().hasAll(['input', 'reflection', 'theme', 'timestamp', 'serverTimestamp'])
+        && (data.keys().hasAll(['question']) ? data.keys().size() == 6 : data.keys().size() == 5)
+        && data.input is string && data.input.size() <= 2000
+        && data.reflection is string && data.reflection.size() <= 6000
+        && (data.keys().hasAll(['question']) ? (data.question is string && data.question.size() <= 2000) : true)
+        && data.theme in ['kindness', 'trust', 'fun', 'teamwork']
+        && data.timestamp is number
+        && data.serverTimestamp is timestamp;
+    }
+
+    function isValidGlobalStats(data) {
+      return data.keys().hasAll(['totalXp', 'totalReflections', 'updatedAt'])
+        && data.keys().size() == 3
+        && data.totalXp is number
+        && data.totalReflections is number
+        && data.updatedAt is timestamp;
+    }
+
+    match /global/stats {
+       allow read: if true;
+       allow write: if isSignedIn() && isValidGlobalStats(incoming());
+    }
+    
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) 
+        && isValidId(userId)
+        && isValidUser(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      
+      allow update: if isOwner(userId)
+        && isValidUser(incoming())
+        && incoming().updatedAt == request.time
+        && incoming().createdAt == existing().createdAt
+        && (incoming().diff(existing()).affectedKeys().hasOnly(['xp', 'level', 'updatedAt']));
+
+      match /reflections/{reflectionId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(reflectionId)
+          && isValidReflection(incoming())
+          && incoming().serverTimestamp == request.time;
+      }
     }
   }
 }
 
 ---------------------------------------------------
+FILE: /.github/workflows/deploy.yml
+PURPOSE: GitHub Actions workflow for building and deploying the application to GitHub Pages.
+CODE:
+# Simple workflow for deploying static content to GitHub Pages
+name: Deploy static content to Pages
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm install
+      - name: Build
+        run: npm run build
+      - name: List dist (debug)
+        run: ls -R dist
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './dist'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+---------------------------------------------------
 FILE: /index.html
-PURPOSE: Main HTML entry point.
+PURPOSE: Main HTML entry point for the single-page application.
 CODE:
 <!doctype html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-  <title>PLAYER_ONE_COOP</title>
-</head>
-<body>
-  <div id="root"></div>
-  <script type="module" src="/src/main.tsx"></script>
-</body>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PLAYER_ONE_COOP</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>
 
 ---------------------------------------------------
 FILE: /src/main.tsx
-PURPOSE: React entry point.
+PURPOSE: React entry point that initializes the app and wraps it with the FirebaseProvider.
 CODE:
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import App from './App';
-import { FirebaseProvider } from './core/FirebaseProvider';
+import App from './App.tsx';
+import { FirebaseProvider } from './components/FirebaseProvider';
+import './index.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <FirebaseProvider>
       <App />
     </FirebaseProvider>
-  </StrictMode>
+  </StrictMode>,
 );
 
 ---------------------------------------------------
+FILE: /src/App.tsx
+PURPOSE: Root component handling authentication flow, primary navigation, and screen routing.
+CODE:
+import { useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import DashboardScreen from './screens/DashboardScreen';
+import MirrorScreen from './screens/MirrorScreen';
+import SimulatorScreen from './screens/SimulatorScreen';
+import PrinciplesScreen from './screens/PrinciplesScreen';
+import HeuristicsScreen from './screens/HeuristicsScreen';
+import { BottomNav } from './components/layout/BottomNav';
+import { Gamepad2, User as UserIcon, LogIn } from 'lucide-react';
+import { useFirebase } from './components/FirebaseProvider';
+import { useSyncCIS } from './hooks/useSyncCIS';
+
+export default function App() {
+  const [view, setView] = useState('dashboard');
+  const { user, loading, signIn, signInAsGuest, logOut } = useFirebase();
+  
+  useSyncCIS(user?.uid);
+
+  const renderView = () => {
+    switch (view) {
+      case 'dashboard': return <DashboardScreen />;
+      case 'mirror': return <MirrorScreen />;
+      case 'simulator': return <SimulatorScreen />;
+      case 'principles': return <PrinciplesScreen />;
+      case 'heuristics': return <HeuristicsScreen />;
+      default: return <DashboardScreen />;
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#2d5a27] flex items-center justify-center">
+        <div className="bg-white border-[4px] border-black p-8 shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
+          <p className="font-black animate-pulse uppercase tracking-widest">Waking Up Brain...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-[#2d5a27] flex items-center justify-center p-4">
+        <div className="bg-white border-[4px] border-black p-10 shadow-[8px_8px_0_0_rgba(0,0,0,1)] max-w-sm w-full text-center space-y-6">
+          <div className="flex justify-center">
+            <Gamepad2 className="text-[#FF0040] w-16 h-16" />
+          </div>
+          <h1 className="text-3xl font-black italic uppercase">Player_One_Coop</h1>
+          <p className="font-bold uppercase text-sm">Welcome back, teammate. Let's sync your intelligence stream.</p>
+          <button 
+            onClick={signIn}
+            className="w-full bg-[#FF0040] text-white border-[4px] border-black py-4 font-black uppercase flex items-center justify-center gap-3 shadow-[4px_4px_0_0_rgba(0,0,0,1)] active:translate-x-1 active:translate-y-1 active:shadow-none"
+          >
+            <LogIn className="w-6 h-6" />
+            Sign in with Google
+          </button>
+          
+          <button 
+            onClick={signInAsGuest}
+            className="w-full bg-[#2d5a27] text-white border-[4px] border-black py-3 font-black uppercase flex items-center justify-center gap-3 shadow-[4px_4px_0_0_rgba(0,0,0,1)] active:translate-x-1 active:translate-y-1 active:shadow-none hover:bg-[#3d7a34]"
+          >
+            Continue as Guest
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#2d5a27] font-sans">
+      <header className="bg-white border-b-[4px] border-black w-full sticky top-0 z-50 h-16 shadow-[0_4px_0_0_rgba(0,0,0,1)]">
+        <div className="max-w-7xl mx-auto px-4 h-full flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <Gamepad2 className="text-[#FF0040] w-8 h-8" />
+            <h1 className="text-2xl font-black text-[#FF0040] italic tracking-widest uppercase cursor-pointer" onClick={() => setView('dashboard')}>
+              PLAYER_ONE_COOP
+            </h1>
+          </div>
+          <div className="flex items-center gap-4">
+            <nav className="hidden md:flex gap-6 items-center">
+              {[
+                { label: 'DASH', view: 'dashboard' },
+                { label: 'MIRROR', view: 'mirror' },
+                { label: 'SIM', view: 'simulator' },
+                { label: 'LOGIC', view: 'heuristics' }
+              ].map((tab) => (
+                <button 
+                  key={tab.label}
+                  onClick={() => setView(tab.view)}
+                  className={`font-black uppercase text-xs px-2 py-1 transition-none ${view === tab.view ? 'bg-yellow-400 text-black' : 'text-black hover:bg-yellow-100'}`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </nav>
+            <div className="flex items-center gap-2">
+               <button 
+                 onClick={logOut}
+                 className="text-[#FF0040] font-black uppercase text-[10px] hover:underline"
+               >
+                 LOG_OUT
+               </button>
+               <button className="text-[#FF0040] hover:scale-110 transition-transform">
+                 <UserIcon className="w-8 h-8" />
+               </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main className="pt-10 pb-24 px-4 max-w-7xl mx-auto">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={view}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+          >
+            {renderView()}
+          </motion.div>
+        </AnimatePresence>
+      </main>
+
+      <BottomNav current={view} setView={setView} />
+    </div>
+  );
+}
+
+---------------------------------------------------
 FILE: /src/index.css
-PURPOSE: Global styles and Tailwind configuration.
+PURPOSE: Global styles, including Tailwind base, theme configuration, and pixel-art aesthetic utilities.
 CODE:
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700;800;900&display=swap');
 @import "tailwindcss";
 
 @theme {
   --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
-  
   --color-primary: #ba002c;
   --color-primary-container: #e9003a;
   --color-secondary: #004ad3;
@@ -138,916 +412,122 @@ CODE:
 }
 
 ---------------------------------------------------
-FILE: /src/App.tsx
-PURPOSE: Root component and routing.
+FILE: /src/components/FirebaseProvider.tsx
+PURPOSE: Context provider for Firebase authentication and initial state management.
 CODE:
-import { useState, useEffect } from 'react';
-import Dashboard from './screens/DashboardScreen';
-import Mirror from './screens/MirrorScreen';
-import Heuristics from './screens/HeuristicsScreen';
-import { useFirebase } from './core/FirebaseProvider';
-import { useCIS } from './state/cisStore';
-import { useProfile } from './hooks/useProfile';
-import { LayoutDashboard, Sparkles, Gavel, LogOut, User as UserIcon } from 'lucide-react';
-import { cn } from './lib/utils';
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { 
+  onAuthStateChanged, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signInAnonymously,
+  signOut, 
+  User 
+} from 'firebase/auth';
+import { doc, getDocFromServer, setDoc, Timestamp } from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
 
-export default function App() {
-  const [view, setView] = useState('dashboard');
-  const { user, loading, logOut } = useFirebase();
-  const { initSync, profile } = useCIS();
-
-  useEffect(() => {
-    if (user?.uid) {
-      const unsub = initSync(user.uid);
-      return () => unsub();
-    }
-  }, [user?.uid, initSync]);
-
-  if (loading || (!user && view !== 'dashboard')) {
-    return (
-      <div className="min-h-screen bg-[#2d5a27] flex items-center justify-center p-4">
-        <div className="bg-white border-[4px] border-black p-10 shadow-[8px_8px_0_0_rgba(0,0,0,1)] text-center animate-pulse">
-           <p className="font-black uppercase italic tracking-widest text-[#FF0040]">Establishing Connection...</p>
-        </div>
-      </div>
-    );
-  }
-
-  const tabs = [
-    { id: 'dashboard', label: 'DASH', icon: LayoutDashboard },
-    { id: 'mirror', label: 'MIRROR', icon: Sparkles },
-    { id: 'heuristics', label: 'LOGIC', icon: Gavel },
-  ];
-
-  return (
-    <div className="min-h-screen bg-[#2d5a27] text-black font-sans pb-24">
-      <header className="bg-white border-b-[4px] border-black h-16 sticky top-0 z-40 px-4">
-        <div className="max-w-4xl mx-auto h-full flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 border-[3px] border-black bg-zinc-100 overflow-hidden shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
-              {profile?.avatar?.src ? (
-                <img src={profile.avatar.src} className="w-full h-full object-cover" alt="UserAvatar" />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center bg-black">
-                   <UserIcon className="text-white w-5 h-5" />
-                </div>
-              )}
-            </div>
-            <h1 className="font-black uppercase italic tracking-tighter text-xl">P1_COOP</h1>
-          </div>
-          <button 
-            onClick={logOut}
-            className="flex items-center gap-2 text-[#FF0040] font-black uppercase text-[10px] hover:bg-red-50 px-2 py-1 border-[2px] border-transparent hover:border-black transition-all"
-          >
-            <LogOut className="w-4 h-4" />
-            Log Out
-          </button>
-        </div>
-      </header>
-
-      <main className="max-w-4xl mx-auto">
-        {view === 'dashboard' && <Dashboard />}
-        {view === 'mirror' && <Mirror />}
-        {view === 'heuristics' && <Heuristics />}
-      </main>
-
-      <nav className="fixed bottom-0 left-0 w-full h-20 flex justify-around items-stretch bg-white border-t-[4px] border-black z-50 shadow-[0_-4px_0_0_rgba(0,0,0,1)]">
-        {tabs.map((tab) => {
-          const Icon = tab.icon;
-          const isActive = view === tab.id;
-          
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setView(tab.id)}
-              className={cn(
-                "flex flex-col items-center justify-center transition-none flex-1 font-black uppercase text-[10px] tracking-tighter",
-                isActive 
-                  ? "bg-[#FF0040] text-white border-x-[4px] border-black translate-y-[-4px] shadow-[0_4px_0_0_rgba(0,0,0,1)]" 
-                  : "text-black hover:bg-yellow-400"
-              )}
-            >
-              <Icon className={cn("mb-1", isActive ? "w-7 h-7" : "w-6 h-6")} />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </nav>
-    </div>
-  );
+interface FirebaseContextType {
+  user: User | null;
+  loading: boolean;
+  signIn: () => Promise<void>;
+  signInAsGuest: () => Promise<void>;
+  logOut: () => Promise<void>;
 }
 
----------------------------------------------------
-FILE: /src/core/FirebaseProvider.tsx
-PURPOSE: Context provider for Firebase authentication.
-CODE:
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { auth, db } from '../lib/firebase';
-import { onAuthStateChanged, signInAnonymously, signOut } from 'firebase/auth';
+const FirebaseContext = createContext<FirebaseContextType | undefined>(undefined);
 
-const Ctx = createContext<any>(null);
-
-export function FirebaseProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<any>(null);
+export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-      
-      // Auto-signin if no user exists and not loading
-      if (!u) {
-        signInAnonymously(auth).catch(err => console.error("Auto guest sign-in failed:", err));
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration or internet connection.");
+        }
       }
+    };
+    testConnection();
+
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+      if (u) {
+        const userRef = doc(db, 'users', u.uid);
+        try {
+          const userDoc = await getDocFromServer(userRef);
+          if (!userDoc.exists()) {
+            await setDoc(userRef, {
+              xp: 0,
+              level: 1,
+              createdAt: Timestamp.now(),
+              updatedAt: Timestamp.now()
+            });
+          }
+        } catch (e) {
+          console.warn("User profile check skipped:", e);
+        }
+        setUser(u);
+      } else {
+        setUser(null);
+      }
+      setLoading(false);
     });
-    return () => unsub();
+
+    return () => unsubscribe();
   }, []);
 
-  const logOut = () => signOut(auth);
-
-  return <Ctx.Provider value={{ user, loading, logOut }}>{children}</Ctx.Provider>;
-}
-
-export const useFirebase = () => useContext(Ctx);
-
----------------------------------------------------
-FILE: /src/hooks/useProfile.ts
-PURPOSE: Profile management hook.
-CODE:
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
-
-export const useProfile = () => {
-  const getProfile = async (uid: string) => {
-    const ref = doc(db, 'users', uid, 'profile', 'main');
-    const snap = await getDoc(ref);
-    return snap.exists() ? snap.data() : null;
-  };
-
-  const saveProfile = async (uid: string, data: any) => {
-    const ref = doc(db, 'users', uid, 'profile', 'main');
-    await setDoc(ref, data, { merge: true });
-  };
-
-  return { getProfile, saveProfile };
-};
-
----------------------------------------------------
-FILE: /src/lib/ai.ts
-PURPOSE: Heuristic AI analysis logic.
-CODE:
-/**
- * Real AI hook for CIS: PLAYER_ONE_COOP
- * This analyzes user input using heuristic modifiers to produce a collaborative response.
- */
-
-export interface AIResponse {
-  reflection: string;
-  theme: 'kindness' | 'trust' | 'fun' | 'teamwork';
-  question: string;
-}
-
-export async function analyzeReflection(input: string, context: { positivityBoost: number; depthLevel: number }): Promise<AIResponse> {
-  const themes: ('kindness' | 'trust' | 'fun' | 'teamwork')[] = ['kindness', 'trust', 'fun', 'teamwork'];
-  const theme = themes[Math.floor(Math.random() * themes.length)];
-  
-  let reflection = `I hear you: "${input}". It sounds like you're processing something meaningful.`;
-  if (context.positivityBoost > 1) {
-    reflection += " I'm really glad we're sharing this together!";
-  }
-  
-  let question = 'What part of this matters most to you right now?';
-  if (context.depthLevel > 1) {
-    question = 'If you could see this through the eyes of a teammate, how would they help you navigate it?';
-  }
-
-  // Simulate network delay
-  await new Promise(resolve => setTimeout(resolve, 1000));
-
-  return {
-    reflection,
-    theme,
-    question,
-  };
-}
-
----------------------------------------------------
-FILE: /src/lib/firebase.ts
-PURPOSE: Firebase initialization and custom error handling.
-CODE:
-import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
-
-const firebaseConfig = {
-  apiKey: "YOUR_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "XXXX",
-  appId: "XXXX"
-};
-
-const app = initializeApp(firebaseConfig);
-
-export const auth = getAuth(app);
-export const db = getFirestore(app);
-
-export function handleFirestoreError(error: any, operationType: string, path: string | null): never {
-  const user = auth.currentUser;
-  const errorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    operationType,
-    path,
-    authInfo: { userId: user?.uid || 'anonymous' }
-  };
-  throw new Error(JSON.stringify(errorInfo));
-}
-
----------------------------------------------------
-FILE: /src/lib/utils.ts
-PURPOSE: Tailwind utility functions.
-CODE:
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
-
----------------------------------------------------
-FILE: /src/state/cisStore.ts
-PURPOSE: Central state management for the application.
-CODE:
-import { create } from 'zustand';
-import { doc, updateDoc, setDoc, onSnapshot, serverTimestamp, collection, addDoc, increment } from 'firebase/firestore';
-import { db, handleFirestoreError } from '../lib/firebase';
-
-export type Theme = 'kindness' | 'trust' | 'fun' | 'teamwork';
-
-export interface Reflection {
-  id?: string;
-  input: string;
-  reflection: string;
-  question?: string;
-  theme: Theme;
-  timestamp: number;
-}
-
-interface CISState {
-  xp: number;
-  level: number;
-  reflections: Reflection[];
-  globalStats: { totalXp: number; totalReflections: number; } | null;
-  loaded: boolean;
-  profile: any;
-
-  setStats: (xp: number, level: number) => void;
-  setReflections: (r: Reflection[]) => void;
-  setGlobalStats: (g: CISState['globalStats']) => void;
-  setLoaded: (v: boolean) => void;
-
-  initSync: (uid: string) => () => void;
-  addReflectionToFirebase: (userId: string, r: Omit<Reflection, 'id' | 'timestamp'>) => Promise<void>;
-  updateXPInFirebase: (userId: string, amount: number) => Promise<void>;
-  getThemeStats: () => Record<Theme, number>;
-  getHeuristicModifiers: () => { positivityBoost: number; depthLevel: number; };
-}
-
-export const useCIS = create<CISState>((set, get) => ({
-  xp: 0,
-  level: 1,
-  reflections: [],
-  globalStats: null,
-  loaded: false,
-  profile: null,
-
-  setStats: (xp, level) => set({ xp, level }),
-  setReflections: (reflections) => set({ reflections }),
-  setGlobalStats: (globalStats) => set({ globalStats }),
-  setLoaded: (loaded) => set({ loaded }),
-
-  initSync: (uid: string) => {
-    const userRef = doc(db, 'users', uid);
-    const profileRef = doc(db, 'users', uid, 'profile', 'main');
-    const globalRef = doc(db, 'global', 'stats');
-    const reflectionsRef = collection(db, 'users', uid, 'reflections');
-    
-    const unsubStats = onSnapshot(userRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        get().setStats(data.xp || 0, data.level || 1);
+  const signIn = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (error: any) {
+      console.error("Google Sign-In Error:", error.code, error.message);
+      if (error.code === 'auth/unauthorized-domain') {
+        alert(`Sign-in failed: This domain is not authorized in the Firebase Console. Please add mumblejinx.github.io to the Authorized Domains list in the Firebase Console under Authentication > Settings.`);
+      } else if (error.code === 'auth/popup-blocked') {
+        alert(`Sign-in failed: The browser blocked the authentication popup. Please allow popups for this site.`);
       } else {
-        setDoc(userRef, { xp: 0, level: 1, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+        alert(`Sign-in failed [${error.code}]: ${error.message}`);
       }
-    });
-
-    const unsubProfile = onSnapshot(profileRef, (snap) => {
-      if (snap.exists()) {
-        set({ profile: snap.data() });
-      }
-    });
-
-    const unsubGlobal = onSnapshot(globalRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        get().setGlobalStats({ totalXp: data.totalXp, totalReflections: data.totalReflections });
-      }
-    });
-
-    const unsubReflections = onSnapshot(reflectionsRef, (snap) => {
-      const refs = snap.docs.map(d => ({ id: d.id, ...d.data() })) as Reflection[];
-      get().setReflections(refs);
-      get().setLoaded(true);
-    });
-    
-    return () => {
-      unsubStats();
-      unsubProfile();
-      unsubGlobal();
-      unsubReflections();
-    };
-  },
-
-  addReflectionToFirebase: async (userId, r) => {
-    const reflectionsRef = collection(db, 'users', userId, 'reflections');
-    const globalRef = doc(db, 'global', 'stats');
-    try {
-      await addDoc(reflectionsRef, { ...r, timestamp: Date.now(), serverTimestamp: serverTimestamp() });
-      await setDoc(globalRef, { totalXp: increment(50), totalReflections: increment(1), updatedAt: serverTimestamp() }, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, 'create', `users/${userId}/reflections`);
-    }
-  },
-
-  updateXPInFirebase: async (userId, amount) => {
-    const userRef = doc(db, 'users', userId);
-    const { xp } = get();
-    const newXP = xp + amount;
-    const newLevel = Math.floor(newXP / 1000) + 1;
-    try {
-      await updateDoc(userRef, { xp: newXP, level: newLevel, updatedAt: serverTimestamp() });
-    } catch (error) {
-      handleFirestoreError(error, 'update', `users/${userId}`);
-    }
-  },
-
-  getThemeStats: () => {
-    const { reflections } = get();
-    const counts: Record<Theme, number> = { kindness: 0, trust: 0, fun: 0, teamwork: 0 };
-    if (reflections.length === 0) return { kindness: 25, trust: 25, fun: 25, teamwork: 25 };
-    reflections.forEach((r) => { 
-      if (counts[r.theme] !== undefined) counts[r.theme]++; 
-    });
-    const total = reflections.length;
-    return {
-      kindness: Math.round((counts.kindness / total) * 100),
-      trust: Math.round((counts.trust / total) * 100),
-      fun: Math.round((counts.fun / total) * 100),
-      teamwork: Math.round((counts.teamwork / total) * 100),
-    };
-  },
-
-  getHeuristicModifiers: () => {
-    const { reflections } = get();
-    return { positivityBoost: reflections.length > 5 ? 1.2 : 1, depthLevel: reflections.length > 10 ? 2 : 1 };
-  },
-}));
-
----------------------------------------------------
-FILE: /src/screens/DashboardScreen.tsx
-PURPOSE: The main user overview and stats screen.
-CODE:
-import { useEffect, useState } from 'react';
-import { useFirebase } from '../core/FirebaseProvider';
-import { useProfile } from '../hooks/useProfile';
-import { useCIS } from '../state/cisStore';
-import AvatarPicker from '../components/AvatarPicker';
-import { Gamepad2, Settings } from 'lucide-react';
-
-export default function DashboardScreen() {
-  const { user } = useFirebase();
-  const { saveProfile } = useProfile();
-  const { xp, level, getThemeStats, profile } = useCIS();
-  const stats = getThemeStats();
-
-  const [open, setOpen] = useState(false);
-
-  const defaultAvatar = 'https://lh3.googleusercontent.com/aida-public/AB6AXuD9zQmmV7bwROQ_onv-VI6iN0jnLUosdnonW1eWD5_-bGjsIbzHWwmn3qyUqcc5nlJcx_1qDrQqzSaNVthXkLm43diIln1AyL1G5nhqKYghyXWMBEfR7_b-51TZ91QLdgT2dtLvpWgmGomW-EFLBewdNg9Hrug6wodkoJYY6WMEKefY-E0mgGBI6Lf-36GgTQv3maazorotCnGs1YaHgeBTpAxcezaHr2pAI1OV8EmtjeU1UB1UJh6qKT2hoTITHm3dyu0NyiQFNJE';
-
-  return (
-    <div className="p-8 space-y-8">
-      <div className="flex justify-between items-center bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
-        <div className="flex items-center gap-6">
-          <div 
-            onClick={() => setOpen(true)}
-            className="group relative cursor-pointer"
-          >
-            <div className="w-24 h-24 border-[4px] border-black bg-tertiary-fixed overflow-hidden transition-transform group-hover:scale-105 active:scale-95">
-              <img 
-                src={profile?.avatar?.src || defaultAvatar} 
-                className="w-full h-full object-cover"
-                alt="Avatar" 
-              />
-            </div>
-            <div className="absolute -bottom-2 -right-2 bg-yellow-400 border-[2px] border-black p-1 shadow-[2px_2px_0_0_rgba(0,0,0,1)]">
-              <Settings className="w-4 h-4 text-black" />
-            </div>
-          </div>
-          <div>
-            <h1 className="text-3xl font-black uppercase italic tracking-tighter">
-              {user?.isAnonymous ? 'GUEST_PLAYER' : (user?.displayName || 'PLAYER_ONE')}
-            </h1>
-            <p className="text-xs font-bold uppercase text-zinc-500 italic">Sync Level: {level}</p>
-          </div>
-        </div>
-        <Gamepad2 className="w-12 h-12 text-[#FF0040] hidden sm:block" />
-      </div>
-
-      {open && (
-        <AvatarPicker
-          level={level}
-          onClose={() => setOpen(false)}
-          onSelect={(a) => {
-            if (user) {
-              saveProfile(user.uid, { avatar: a });
-              setOpen(false);
-            }
-          }}
-        />
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <div className="bg-[#2d5a27] border-[4px] border-black p-8 shadow-[12px_12px_0_0_rgba(0,0,0,1)] text-white flex flex-col justify-between">
-           <div>
-             <div className="text-xs font-black uppercase text-[#7eff51] tracking-widest mb-1">Intelligence Rank</div>
-             <div className="text-6xl font-black italic uppercase">LVL {level}</div>
-           </div>
-           
-           <div className="mt-8 space-y-4">
-             <div className="text-[10px] font-black uppercase text-white/60">Core Vibe Matrix</div>
-             <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1">
-                   <div className="text-[10px] font-black uppercase flex justify-between">
-                      <span>Kindness</span>
-                      <span>{stats.kindness}%</span>
-                   </div>
-                   <div className="h-1 bg-white/20"><div className="h-full bg-[#7eff51]" style={{ width: `${stats.kindness}%` }} /></div>
-                </div>
-                <div className="space-y-1">
-                   <div className="text-[10px] font-black uppercase flex justify-between">
-                      <span>Trust</span>
-                      <span>{stats.trust}%</span>
-                   </div>
-                   <div className="h-1 bg-white/20"><div className="h-full bg-cyan-400" style={{ width: `${stats.trust}%` }} /></div>
-                </div>
-                <div className="space-y-1">
-                   <div className="text-[10px] font-black uppercase flex justify-between">
-                      <span>Fun</span>
-                      <span>{stats.fun}%</span>
-                   </div>
-                   <div className="h-1 bg-white/20"><div className="h-full bg-yellow-400" style={{ width: `${stats.fun}%` }} /></div>
-                </div>
-                <div className="space-y-1">
-                   <div className="text-[10px] font-black uppercase flex justify-between">
-                      <span>Teamwork</span>
-                      <span>{stats.teamwork}%</span>
-                   </div>
-                   <div className="h-1 bg-white/20"><div className="h-full bg-orange-400" style={{ width: `${stats.teamwork}%` }} /></div>
-                </div>
-             </div>
-           </div>
-
-           <div className="mt-4 pt-4 border-t-[2px] border-white/20">
-             <div className="text-[10px] font-black uppercase">Next Unlock at Level {level + 1}</div>
-           </div>
-        </div>
-
-        <div className="bg-white border-[4px] border-black p-8 shadow-[12px_12px_0_0_rgba(0,0,0,1)] space-y-6">
-          <div className="space-y-2">
-            <div className="flex justify-between font-black text-xs uppercase">
-              <span>Experience Pool</span>
-              <span className="text-[#FF0040]">{xp} XP</span>
-            </div>
-            <div className="h-8 border-[3px] border-black bg-zinc-100 p-1">
-              <div 
-                className="h-full bg-[#FF0040] transition-all duration-700" 
-                style={{ width: `${(xp % 1000) / 10}%` }}
-              />
-            </div>
-          </div>
-          
-          <div className="bg-zinc-50 p-4 border-[2px] border-black flex items-center justify-between">
-            <div className="text-[10px] font-black uppercase">Current Bond Stability</div>
-            <div className="text-xl font-black uppercase text-tertiary-container italic">{(xp / 100).toFixed(1)}%</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
----------------------------------------------------
-FILE: /src/screens/MirrorScreen.tsx
-PURPOSE: Reflection terminal with AI feedback.
-CODE:
-import { useState } from 'react';
-import { useFirebase } from '../core/FirebaseProvider';
-import { useCIS } from '../state/cisStore';
-import { analyzeReflection } from '../lib/ai';
-import { Sparkles, Eye, Terminal, ShieldAlert } from 'lucide-react';
-
-export default function MirrorScreen() {
-  const [input, setInput] = useState('');
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [output, setOutput] = useState<{ reflection: string; question: string; theme: string; } | null>(null);
-  const { user } = useFirebase();
-  const { addReflectionToFirebase, updateXPInFirebase, getHeuristicModifiers } = useCIS();
-
-  const handleReflect = async () => {
-    if (!input.trim() || !user) return;
-    setIsAnalyzing(true);
-    try {
-      const res = await analyzeReflection(input, getHeuristicModifiers());
-      setOutput(res);
-      await addReflectionToFirebase(user.uid, { 
-        input, 
-        reflection: res.reflection, 
-        question: res.question, 
-        theme: res.theme as any 
-      });
-      await updateXPInFirebase(user.uid, 50);
-      setInput('');
-    } catch (e) { 
-      console.error(e); 
-    } finally { 
-      setIsAnalyzing(false); 
     }
   };
 
-  return (
-    <div className="p-6 space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
-      <div className="bg-white border-[4px] border-black p-6 shadow-[12px_12px_0_0_rgba(0,0,0,1)] relative overflow-hidden">
-        <div className="absolute top-0 right-0 bg-[#FF0040] p-1 border-l-[4px] border-b-[4px] border-black font-black text-[8px] text-white uppercase italic">Active_Mirror</div>
-         <div className="flex items-center gap-4 mb-4">
-            <Sparkles className="text-[#FF0040] w-10 h-10" />
-            <div>
-               <h1 className="text-4xl font-black uppercase italic tracking-tighter text-[#FF0040]">THE_MIRROR</h1>
-               <p className="font-bold text-[10px] uppercase tracking-widest text-zinc-500">Cognitive Interface System</p>
-            </div>
-         </div>
-         <p className="font-bold text-sm uppercase leading-tight max-w-sm mb-6">Input your current headspace to sync with the collective intelligence system.</p>
-      </div>
+  const signInAsGuest = async () => {
+    try {
+      await signInAnonymously(auth);
+    } catch (error: any) {
+      console.error("Guest Sign-In Error:", error.code, error.message);
+      if (error.code === 'auth/operation-not-allowed') {
+        alert("Guest Mode is not active yet. Please ensure the 'Anonymous' provider is enabled in your Firebase Authentication settings (Authentication > Sign-in method).");
+      } else {
+        alert(`Guest sign-in failed [${error.code}]: ${error.message}`);
+      }
+    }
+  };
 
-      <div className="bg-white border-[4px] border-black p-6 shadow-[12px_12px_0_0_rgba(0,0,0,1)] space-y-6">
-        <div className="space-y-4">
-          <label className="flex items-center gap-2 text-sm font-black uppercase tracking-widest">
-            <Terminal className="w-4 h-4 text-[#FF0040]" />
-            Entry Terminal
-          </label>
-          <textarea 
-            value={input}
-            onChange={(e) => setInput(e.target.value)} 
-            disabled={isAnalyzing}
-            className="w-full bg-zinc-50 border-[4px] border-black p-6 font-bold text-lg min-h-[200px] focus:outline-none focus:bg-white transition-all placeholder:text-zinc-300 disabled:opacity-50"
-            placeholder="Tell me how your day is going..."
-          />
-        </div>
-
-        <button 
-          onClick={handleReflect}
-          disabled={isAnalyzing || !input.trim()}
-          className="w-full group relative bg-[#FF0040] text-white border-[4px] border-black py-6 font-black uppercase text-2xl shadow-[8px_8px_0_0_rgba(0,0,0,1)] active:translate-x-1 active:translate-y-1 active:shadow-none hover:bg-red-500 transition-all disabled:opacity-50"
-        >
-          {isAnalyzing ? "THINKING..." : "SHARE REFLECTION"}
-        </button>
-      </div>
-
-      {output && (
-        <div className="animate-in fade-in slide-in-from-bottom-5 duration-500">
-           <div className="bg-white border-[4px] border-black p-8 shadow-[12px_12px_0_0_rgba(0,0,0,1)] space-y-6">
-              <div className="flex items-center gap-2 border-b-[4px] border-black pb-2 text-[#FF0040]">
-                <Eye className="w-6 h-6" />
-                <h3 className="text-sm font-black uppercase tracking-widest">Mirror Feedback</h3>
-              </div>
-              <div className="space-y-4">
-                <p className="font-bold italic text-xl leading-snug">"{output.reflection}"</p>
-                <p className="bg-zinc-100 p-4 border-[2px] border-black font-black text-sm uppercase text-zinc-600">
-                   {output.question}
-                </p>
-              </div>
-              <div className="flex justify-between items-center bg-black text-white px-2 text-[8px] font-black uppercase py-1">
-                 <span>Theme Detected: {output.theme}</span>
-                 <span className="text-[#7eff51]">SYNC SUCCESSFUL</span>
-              </div>
-           </div>
-        </div>
-      )}
-
-      <div className="bg-yellow-400 border-[4px] border-black p-4 flex gap-4 items-center shadow-[12px_12px_0_0_rgba(0,0,0,1)]">
-         <ShieldAlert className="w-8 h-8 shrink-0" />
-         <p className="text-[10px] font-black uppercase italic leading-none">Your thoughts remain private and are only used to calculate heuristic team stability coefficients.</p>
-      </div>
-    </div>
-  );
-}
-
----------------------------------------------------
-FILE: /src/screens/HeuristicsScreen.tsx
-PURPOSE: Logic system and XP stats.
-CODE:
-import { useCIS } from '../state/cisStore';
-import { Cpu, Zap } from 'lucide-react';
-
-export default function HeuristicsScreen() {
-  const { xp, level } = useCIS();
+  const logOut = async () => {
+    await signOut(auth);
+  };
 
   return (
-    <div className="p-8 space-y-8">
-      <h1 className="text-4xl font-black uppercase italic text-[#FF0040]">LOGIC SYSTEM</h1>
-      
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)] flex items-center gap-4">
-          <div className="bg-zinc-100 p-3 border-[2px] border-black">
-            <Zap className="w-8 h-8 text-yellow-500" />
-          </div>
-          <div>
-            <div className="text-3xl font-black">{xp}</div>
-            <div className="text-[10px] font-black uppercase text-zinc-500 tracking-widest">Total Harmony XP</div>
-          </div>
-        </div>
-
-        <div className="bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)] flex items-center gap-4">
-          <div className="bg-zinc-100 p-3 border-[2px] border-black">
-            <Cpu className="w-8 h-8 text-primary" />
-          </div>
-          <div>
-            <div className="text-3xl font-black">LVL {level}</div>
-            <div className="text-[10px] font-black uppercase text-zinc-500 tracking-widest">System Intelligence Level</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-black text-[#7eff51] p-6 border-[4px] border-black font-mono text-sm shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
-        <p>&gt; ANALYZING_COOPERATIVE_DATA...</p>
-        <p>&gt; HEURISTIC_SYNC: STABLE</p>
-        <p>&gt; XP_OFFSET: {(xp % 1000)}/1000</p>
-        <p className="animate-pulse">&gt; WAITING_FOR_SYNC_CYCLES...</p>
-      </div>
-    </div>
+    <FirebaseContext.Provider value={{ user, loading, signIn, signInAsGuest, logOut }}>
+      {children}
+    </FirebaseContext.Provider>
   );
-}
+};
 
----------------------------------------------------
-FILE: /src/screens/SimulatorScreen.tsx
-PURPOSE: Visualization of intelligence flows.
-CODE:
-import { Section } from '../components/layout/Section';
-import { Cpu, Terminal, Activity, Zap } from 'lucide-react';
-import { useCIS } from '../state/cisStore';
-
-export default function SimulatorScreen() {
-  const { reflections } = useCIS();
-  const recentReflections = reflections.slice(-8).reverse();
-
-  return (
-    <div className="space-y-8 pb-20">
-      <section className="bg-white border-[4px] border-black shadow-[8px_8px_0_0_rgba(0,0,0,1)] p-8 relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-full h-2 bg-yellow-400"></div>
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
-          <div className="space-y-2">
-            <div className="flex items-center gap-3">
-              <div className="w-4 h-4 bg-primary border-[2px] border-black animate-pulse"></div>
-              <h2 className="text-2xl font-black text-primary uppercase tracking-tight font-['Space_Grotesk']">How it Works</h2>
-            </div>
-            <p className="text-4xl md:text-5xl font-black text-black uppercase leading-none">Real-Time Brain View</p>
-            <div className="flex gap-2 pt-4">
-              <span className="bg-secondary text-white px-4 py-1 font-bold uppercase border-[2px] border-black shadow-[4px_4px_0_0_rgba(0,0,0,1)] text-xs">Active Memories: {reflections.length}</span>
-              <span className="bg-tertiary text-white px-4 py-1 font-bold uppercase border-[2px] border-black shadow-[4px_4px_0_0_rgba(0,0,0,1)] text-xs">Team Spirit: 98%</span>
-            </div>
-          </div>
-          <div className="w-full md:w-64 shrink-0">
-            <div className="border-[4px] border-black p-4 bg-surface-container-highest flex flex-col items-center justify-center aspect-square shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-              <Cpu className="w-20 h-20 text-primary mb-4" />
-              <span className="font-black uppercase text-center text-[10px] tracking-widest">Memory Nodes Online</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
-        <div className="md:col-span-8 bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
-          <div className="flex items-center justify-between border-b-[4px] border-black pb-4 mb-6">
-            <h3 className="text-2xl font-black uppercase">Recent Intelligence Flows</h3>
-            <Cpu className="w-8 h-8" />
-          </div>
-          
-          <div className="space-y-4">
-            {recentReflections.length > 0 ? recentReflections.map((r, i) => (
-              <div key={i} className="bg-surface-container p-4 border-[2px] border-black border-r-[6px] border-b-[6px] flex justify-between items-center">
-                <div>
-                  <p className="text-xs uppercase font-black text-secondary">{r.theme} FLOW</p>
-                  <p className="text-lg font-bold line-clamp-1 italic">"{r.input}"</p>
-                </div>
-                <div className="text-[10px] font-black uppercase bg-black text-white px-2 py-1">
-                  {new Date(r.timestamp).toLocaleTimeString()}
-                </div>
-              </div>
-            )) : (
-              <div className="bg-surface-container p-8 border-[2px] border-black border-r-[6px] border-b-[6px] text-center italic font-bold">
-                No intelligence flows detected yet. Share something in the Mirror!
-              </div>
-            )}
-          </div>
-
-          <div className="mt-8 space-y-2">
-            <div className="flex justify-between items-end">
-              <p className="font-black uppercase text-xs">Processing Breadth</p>
-              <p className="font-black text-primary">{Math.min(100, reflections.length * 10)}%</p>
-            </div>
-            <div className="h-10 border-[4px] border-black bg-white p-1 flex gap-1">
-              {[...Array(10)].map((_, i) => (
-                <div key={i} className={`h-full flex-1 ${i < reflections.length ? 'bg-primary' : 'bg-surface-container'}`} />
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <aside className="md:col-span-4 space-y-8">
-          <div className="bg-yellow-400 border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)] relative">
-            <div className="absolute -top-3 right-4 bg-black text-white px-3 py-1 font-black text-[10px] uppercase">TIP</div>
-            <h3 className="text-xl font-black uppercase leading-none mb-4">Memory Expansion</h3>
-            <p className="font-bold text-xs mb-6 uppercase">The more you share, the smarter the system becomes. Keep sharing to unlock deep heuristics!</p>
-            <button className="w-full bg-primary text-white py-4 font-black uppercase text-lg border-[4px] border-black shadow-[4px_4px_0_0_rgba(0,0,0,1)] active:translate-x-1 active:translate-y-1 active:shadow-none transition-all">
-                Learn More
-            </button>
-          </div>
-
-          <div className="bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
-            <div className="flex items-center gap-4 mb-4">
-              <div className="w-10 h-10 bg-cyan-400 border-[2px] border-black flex items-center justify-center">
-                <Terminal className="w-6 h-6 text-black" />
-              </div>
-              <h4 className="font-black uppercase text-sm">Live Kernel Stream</h4>
-            </div>
-            <div className="bg-black text-tertiary-fixed p-4 font-mono text-[10px] h-32 overflow-hidden leading-relaxed">
-              &gt; MEMORY_NODES: {reflections.length}<br/>
-              &gt; HEURISTIC_SYNC: ACTIVE<br/>
-              &gt; POSITIVITY_BOOST: {reflections.length > 5 ? 'x1.2' : 'x1.0'}<br/>
-              &gt; DEPTH_LEVEL: {reflections.length > 10 ? '2' : '1'}<br/>
-              &gt; STATUS: STABLE<br/>
-              &gt; WAITING FOR INPUT...
-            </div>
-          </div>
-        </aside>
-      </div>
-    </div>
-  );
-}
-
----------------------------------------------------
-FILE: /src/screens/PrinciplesScreen.tsx
-PURPOSE: Rules and core cooperative concepts.
-CODE:
-import { Section } from '../components/layout/Section';
-import { Handshake, Star, Shield, Cpu, Zap, Activity, CloudDownload, Radio } from 'lucide-react';
-import { cn } from '../lib/utils';
-
-export default function PrinciplesScreen() {
-  return (
-    <div className="space-y-8 pb-20">
-      <section className="bg-tertiary-container border-[4px] border-black p-8 shadow-[8px_8px_0_0_rgba(0,0,0,1)] relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none" style={{ backgroundImage: 'radial-gradient(circle, #000 2px, transparent 0)', backgroundSize: '16px 16px' }} />
-        <div className="relative z-10">
-          <div className="inline-block bg-white border-[2px] border-black px-4 py-1 mb-4 shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-            <span className="text-black font-black uppercase tracking-widest text-[10px]">Level: 01 / Basics</span>
-          </div>
-          <h2 className="text-white font-black text-5xl md:text-6xl uppercase mb-6 drop-shadow-[4px_4px_0_rgba(0,0,0,1)]">How to Play</h2>
-          <div className="flex items-center gap-4 bg-black text-white p-6 border-[4px] border-black max-w-2xl">
-            <Handshake className="w-12 h-12 text-tertiary-fixed" />
-            <p className="text-3xl md:text-4xl font-black uppercase italic leading-none">Be a great team</p>
-          </div>
-        </div>
-      </section>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="md:col-span-2 bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)] flex flex-col justify-between">
-          <div className="border-l-[8px] border-secondary-container pl-6">
-            <h3 className="text-3xl font-black uppercase text-black mb-4">Thinking Together</h3>
-            <p className="text-lg font-bold text-on-surface-variant max-w-xl">We're a team! We work together like two friends playing a favorite game, helping each other win every level.</p>
-          </div>
-        </div>
-
-        <div className="bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)] flex flex-col items-center justify-center text-center">
-          <div className="w-16 h-16 bg-black border-[2px] border-black mb-4 flex items-center justify-center shadow-[4px_4px_0_0_rgba(0,0,0,1)]">
-            <Shield className="text-tertiary-fixed w-8 h-8" />
-          </div>
-          <h4 className="text-2xl font-black uppercase text-black mb-2">Safe Store</h4>
-          <p className="text-xs font-black uppercase text-zinc-500 tracking-widest">Safe and Sound</p>
-        </div>
-
-        <div className="md:col-span-2 bg-secondary-container border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)] text-white">
-          <div className="flex flex-col md:flex-row gap-6 items-start">
-            <div className="flex-1">
-              <h3 className="text-3xl font-black uppercase mb-4">Grow Together</h3>
-              <p className="text-lg font-bold mb-6">Every interaction makes our bond stronger. As we play more, we learn more about each other and succeed as a team!</p>
-            </div>
-            <div className="w-full md:w-48 h-48 bg-black border-[4px] border-black flex items-center justify-center relative shadow-[4px_4px_0_0_rgba(255,255,255,1)] shrink-0">
-              <Cpu className="text-white w-20 h-20" />
-              <div className="absolute -top-2 -right-2 bg-tertiary-fixed text-black font-black p-1 text-[10px] border-[2px] border-black">CPU: 99%</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
----------------------------------------------------
-FILE: /src/components/AvatarPicker.tsx
-PURPOSE: Profile image selection interface.
-CODE:
-import { avatars } from './avatarData';
-import { X, Lock } from 'lucide-react';
-import { cn } from '../lib/utils';
-
-interface AvatarPickerProps {
-  level: number;
-  onSelect: (avatar: any) => void;
-  onClose: () => void;
-}
-
-export default function AvatarPicker({ level, onSelect, onClose }: AvatarPickerProps) {
-  return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[100] p-4 backdrop-blur-sm">
-      <div className="bg-white border-[4px] border-black p-8 shadow-[12px_12px_0_0_rgba(0,0,0,1)] max-w-lg w-full relative">
-        <button 
-          onClick={onClose}
-          className="absolute top-4 right-4 bg-black text-white p-1 border-[2px] border-black hover:bg-zinc-800 transition-colors"
-        >
-          <X className="w-5 h-5" />
-        </button>
-
-        <h2 className="text-3xl font-black uppercase italic italic mb-8 tracking-tighter">SELECT_AVATAR</h2>
-
-        <div className="grid grid-cols-3 gap-6">
-          {avatars.map(a => {
-            const isLocked = level < a.unlock;
-            return (
-              <button 
-                key={a.id} 
-                disabled={isLocked}
-                onClick={() => onSelect(a)}
-                className={cn(
-                  "relative group aspect-square border-[4px] border-black transition-all",
-                  isLocked 
-                    ? "bg-zinc-200 cursor-not-allowed opacity-50 grayscale" 
-                    : "bg-tertiary-fixed hover:translate-x-1 hover:translate-y-1 hover:shadow-none shadow-[4px_4px_0_0_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px]"
-                )}
-              >
-                <img src={a.src} className="w-full h-full object-cover" alt={`Avatar ${a.id}`} />
-                
-                {isLocked && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/20">
-                    <Lock className="w-6 h-6 text-black" />
-                    <span className="text-[10px] font-black uppercase bg-black text-white px-1">LVL {a.unlock}</span>
-                  </div>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
----------------------------------------------------
-FILE: /src/components/avatarData.ts
-PURPOSE: Asset library for avatars.
-CODE:
-export const avatars = [
-  { 
-    id: 'a1', 
-    src: 'https://lh3.googleusercontent.com/aida-public/AB6AXuD9zQmmV7bwROQ_onv-VI6iN0jnLUosdnonW1eWD5_-bGjsIbzHWwmn3qyUqcc5nlJcx_1qDrQqzSaNVthXkLm43diIln1AyL1G5nhqKYghyXWMBEfR7_b-51TZ91QLdgT2dtLvpWgmGomW-EFLBewdNg9Hrug6wodkoJYY6WMEKefY-E0mgGBI6Lf-36GgTQv3maazorotCnGs1YaHgeBTpAxcezaHr2pAI1OV8EmtjeU1UB1UJh6qKT2hoTITHm3dyu0NyiQFNJE', 
-    unlock: 1 
-  },
-  { 
-    id: 'a2', 
-    src: 'https://lh3.googleusercontent.com/aida-public/AB6AXuCVIVe3qfdYXDApgcb8v7GTEOlRvTvFM9f0EpBJqq0HKDK3G8oPCHKqI-RHyWQ-o6q9w9Vo8RrHv1f9PKnieZvBP_0us3yLSAKRXkSg5dPsKpPF0BXTdjCXnF5mK8f-6g-Lp6DNn8QM_iPlyQGh9KlN2a5vOyMu1CNgMkTFX0834uVbaGKJTRO2y3PVUSQkzHCWoNIvBP5kJ_vJzRIHGjB6LB8w4aBsnVtW_jwdIhtvpos2P7xsRxj_QIJ6KUIAiRjVhusE1H5UkwI', 
-    unlock: 2 
-  },
-  { 
-    id: 'a3', 
-    src: 'https://lh3.googleusercontent.com/aida-public/AB6AXuD0T-MoUGFNjOnTjI4XtSMDrazug3UoBPHVE0oNjenFti1Rpc6bqRaFxJFahc4ObLpu5Y-G5PiyLw9pbKQQ0oEUienpxUhu1E17zAQ_Idq0UejOfa8reyF15dwLW7f9CjPSSjJfbugxd9pHQsbt3yD9k3ziLFvZYqlRziT-VIncYTxbCLlfm8DHRfkGRlX1KxZzo59du9EUEsphook8JiZEiheS8lKGcJWjvsNsjclbfqlrFgFdQpZedccvfBKLW5TU2X9Cc5Ty6kc', 
-    unlock: 3 
-  }
-];
+export const useFirebase = () => {
+  const context = useContext(FirebaseContext);
+  if (!context) throw new Error('useFirebase must be used within FirebaseProvider');
+  return context;
+};
 
 ---------------------------------------------------
 FILE: /src/components/layout/BottomNav.tsx
-PURPOSE: Main bottom navigation.
+PURPOSE: Mobile-first bottom navigation with pixel-art styling.
 CODE:
 import { LayoutDashboard, Sparkles, Gamepad2, ScrollText, Gavel } from 'lucide-react';
 import { cn } from '../../lib/utils';
@@ -1092,173 +572,370 @@ export function BottomNav({ current, setView }: BottomNavProps) {
 }
 
 ---------------------------------------------------
-FILE: /src/game/missions.ts
-PURPOSE: Mission definitions and randomization logic.
+FILE: /src/components/layout/Section.tsx
+PURPOSE: Reusable card/section component with custom variants and chunky borders.
 CODE:
-export type Mission = {
-  id: string;
-  text: string;
-  theme: 'kindness' | 'trust' | 'fun' | 'teamwork';
-  difficulty: 1 | 2 | 3;
+import { ReactNode } from 'react';
+import { cn } from '../../lib/utils';
+
+interface SectionProps {
+  title: string;
+  children: ReactNode;
+  className?: string;
+  titleClassName?: string;
+  variant?: 'white' | 'green' | 'black' | 'yellow' | 'blue';
+}
+
+export function Section({ title, children, className, titleClassName, variant = 'white' }: SectionProps) {
+  const variants = {
+    white: "bg-white border-black",
+    green: "bg-[#2d5a27] border-black text-white",
+    black: "bg-black border-black text-white",
+    yellow: "bg-yellow-400 border-black",
+    blue: "bg-secondary-container border-black text-white"
+  };
+
+  return (
+    <div className={cn("space-y-2", className)}>
+      <h2 className={cn(
+        "text-sm font-black uppercase tracking-widest",
+        variant === 'green' || variant === 'black' || variant === 'blue' ? "text-tertiary-fixed" : "text-primary",
+        titleClassName
+      )}>
+        {title}
+      </h2>
+      <div className={cn(
+        "border-[4px] p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-[6px_6px_0_0_rgba(0,0,0,1)] transition-all",
+        variants[variant]
+      )}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+---------------------------------------------------
+FILE: /src/hooks/useSyncCIS.ts
+PURPOSE: Synchronizes Firestore data (user stats, reflections, global metrics) with the local Zustand store.
+CODE:
+import { useEffect } from 'react';
+import { doc, collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import { useCIS, Reflection } from '../state/cisStore';
+
+export const useSyncCIS = (userId: string | undefined) => {
+  const { setStats, setReflections, setGlobalStats, setLoaded } = useCIS();
+
+  useEffect(() => {
+    const globalRef = doc(db, 'global', 'stats');
+    const unsubGlobal = onSnapshot(globalRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setGlobalStats({
+          totalXp: data.totalXp || 0,
+          totalReflections: data.totalReflections || 0
+        });
+      } else {
+        setGlobalStats({ totalXp: 0, totalReflections: 0 });
+      }
+    }, (error) => console.warn("Global stats sync failed:", error));
+
+    if (!userId) {
+      setLoaded(false);
+      return () => unsubGlobal();
+    }
+
+    const userRef = doc(db, 'users', userId);
+    const unsubUser = onSnapshot(userRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setStats(data.xp || 0, data.level || 1);
+      }
+    }, (error) => console.error("User sync error:", error));
+
+    const reflectionsRef = collection(db, 'users', userId, 'reflections');
+    const q = query(reflectionsRef, orderBy('serverTimestamp', 'desc'), limit(50));
+    const unsubReflections = onSnapshot(q, (querySnap) => {
+      const refs = querySnap.docs.map(d => ({
+        id: d.id,
+        ...d.data()
+      })) as Reflection[];
+      setReflections([...refs].reverse()); 
+      setLoaded(true);
+    }, (error) => console.error("Reflections sync error:", error));
+
+    return () => {
+      unsubGlobal();
+      unsubUser();
+      unsubReflections();
+    };
+  }, [userId, setStats, setReflections, setGlobalStats, setLoaded]);
 };
 
-export const missions: Mission[] = [
-  {
-    id: 'm1',
-    text: 'Describe a moment today where you showed kindness.',
-    theme: 'kindness',
-    difficulty: 1,
-  },
-  {
-    id: 'm2',
-    text: 'What is something that made you feel uncertain today?',
-    theme: 'trust',
-    difficulty: 1,
-  },
-  {
-    id: 'm3',
-    text: 'What made you smile today?',
-    theme: 'fun',
-    difficulty: 1,
-  },
-  {
-    id: 'm4',
-    text: 'Describe a moment where teamwork could have helped.',
-    theme: 'teamwork',
-    difficulty: 2,
-  },
-  {
-    id: 'm5',
-    text: 'What is something you avoided today and why?',
-    theme: 'trust',
-    difficulty: 2,
-  },
-  {
-    id: 'm6',
-    text: 'How would a teammate support you right now?',
-    theme: 'teamwork',
-    difficulty: 3,
-  },
-];
+---------------------------------------------------
+FILE: /src/lib/ai.ts
+PURPOSE: Simulation logic for AI analysis based on user reflections and heuristic modifiers.
+CODE:
+export interface AIResponse {
+  reflection: string;
+  theme: 'kindness' | 'trust' | 'fun' | 'teamwork';
+  question: string;
+}
 
-export function getRandomMission(): Mission {
-  return missions[Math.floor(Math.random() * missions.length)];
+export async function analyzeReflection(input: string, context: { positivityBoost: number; depthLevel: number }): Promise<AIResponse> {
+  const themes: ('kindness' | 'trust' | 'fun' | 'teamwork')[] = ['kindness', 'trust', 'fun', 'teamwork'];
+  const theme = themes[Math.floor(Math.random() * themes.length)];
+  
+  let reflection = `I hear you: "${input}". It sounds like you're processing something meaningful.`;
+  if (context.positivityBoost > 1) {
+    reflection += " I'm really glad we're sharing this together!";
+  }
+  
+  let question = 'What part of this matters most to you right now?';
+  if (context.depthLevel > 1) {
+    question = 'If you could see this through the eyes of a teammate, how would they help you navigate it?';
+  }
+
+  await new Promise(resolve => setTimeout(resolve, 1000));
+
+  return { reflection, theme, question };
 }
 
 ---------------------------------------------------
-FILE: /src/game/progression.ts
-PURPOSE: XP calculation, leveling, and title management.
+FILE: /src/lib/firebase.ts
+PURPOSE: Firebase SDK initialization and custom error handling logic.
 CODE:
-export function calculateXP(input: string, difficulty: number): number {
-  let base = 30 + difficulty * 20;
+import { initializeApp } from 'firebase/app';
+import { getAuth } from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
+import firebaseConfig from '../../firebase-applet-config.json';
 
-  if (input.length > 150) base += 20;
-  if (input.length > 300) base += 30;
+const app = initializeApp(firebaseConfig);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId); 
+export const auth = getAuth(app);
 
-  return base;
+export function handleFirestoreError(error: any, operationType: string, path: string | null): never {
+  const user = auth.currentUser;
+  const errorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    operationType,
+    path,
+    authInfo: { userId: user?.uid || 'anonymous' }
+  };
+  throw new Error(JSON.stringify(errorInfo));
 }
 
-export function getLevel(xp: number): number {
-  return Math.floor(xp / 1000) + 1;
+---------------------------------------------------
+FILE: /src/state/cisStore.ts
+PURPOSE: Central state management using Zustand for XP, level, reflections, and global statistics.
+CODE:
+import { create } from 'zustand';
+import { 
+  doc, collection, setDoc, addDoc, serverTimestamp, updateDoc, increment, Timestamp
+} from 'firebase/firestore';
+import { db, handleFirestoreError } from '../lib/firebase';
+
+export type Theme = 'kindness' | 'trust' | 'fun' | 'teamwork';
+export interface Reflection { id?: string; input: string; reflection: string; question?: string; theme: Theme; timestamp: number; }
+
+interface CISState {
+  xp: number; level: number; reflections: Reflection[]; globalStats: { totalXp: number; totalReflections: number; } | null;
+  addReflectionToFirebase: (userId: string, r: Omit<Reflection, 'id' | 'timestamp'>) => Promise<void>;
+  updateXPInFirebase: (userId: string, amount: number) => Promise<void>;
+  getThemeStats: () => Record<Theme, number>;
+  getHeuristicModifiers: () => { positivityBoost: number; depthLevel: number; };
 }
 
-export function getTitle(level: number): string {
-  const titles = [
-    'Observer',
-    'Reflector',
-    'Collaborator',
-    'Strategist',
-    'System Builder',
+export const useCIS = create<CISState>((set, get) => ({
+  xp: 0, level: 1, reflections: [], globalStats: null,
+  setStats: (xp: number, level: number) => set({ xp, level }),
+  setReflections: (reflections: Reflection[]) => set({ reflections }),
+  setGlobalStats: (globalStats: CISState['globalStats']) => set({ globalStats }),
+
+  addReflectionToFirebase: async (userId, r) => {
+    const reflectionsRef = collection(db, 'users', userId, 'reflections');
+    const globalRef = doc(db, 'global', 'stats');
+    try {
+      await addDoc(reflectionsRef, { ...r, timestamp: Date.now(), serverTimestamp: serverTimestamp() });
+      await setDoc(globalRef, { totalXp: increment(50), totalReflections: increment(1), updatedAt: serverTimestamp() }, { merge: true });
+    } catch (error) { handleFirestoreError(error, 'create', `users/${userId}/reflections`); }
+  },
+
+  updateXPInFirebase: async (userId, amount) => {
+    const userRef = doc(db, 'users', userId);
+    const { xp } = get();
+    const newXP = xp + amount;
+    const newLevel = Math.floor(newXP / 1000) + 1;
+    try {
+      await updateDoc(userRef, { xp: newXP, level: newLevel, updatedAt: serverTimestamp() });
+    } catch (error) { handleFirestoreError(error, 'update', `users/${userId}`); }
+  },
+
+  getThemeStats: () => {
+    const { reflections } = get();
+    const counts: Record<Theme, number> = { kindness: 0, trust: 0, fun: 0, teamwork: 0 };
+    if (reflections.length === 0) return { kindness: 25, trust: 25, fun: 25, teamwork: 25 };
+    reflections.forEach((r) => { counts[r.theme]++; });
+    const total = reflections.length;
+    return {
+      kindness: Math.round((counts.kindness / total) * 100),
+      trust: Math.round((counts.trust / total) * 100),
+      fun: Math.round((counts.fun / total) * 100),
+      teamwork: Math.round((counts.teamwork / total) * 100),
+    };
+  },
+
+  getHeuristicModifiers: () => {
+    const { reflections } = get();
+    return { positivityBoost: reflections.length > 5 ? 1.2 : 1, depthLevel: reflections.length > 10 ? 2 : 1 };
+  },
+}));
+
+---------------------------------------------------
+FILE: /src/screens/DashboardScreen.tsx
+PURPOSE: The main overview page showing XP, level, team stats, and the community matrix.
+CODE:
+import { Section } from '../components/layout/Section';
+import { useCIS } from '../state/cisStore';
+import { Zap, Lightbulb, Activity, Globe } from 'lucide-react';
+
+export default function DashboardScreen() {
+  const { xp, level, getThemeStats, reflections, globalStats } = useCIS();
+  const stats = getThemeStats();
+  const xpNext = level * 1000 + 4000; 
+  const recentReflections = [...reflections].slice(-4).reverse();
+
+  return (
+    <div className=\"space-y-8 pb-10\">
+      {globalStats && (
+        <div className=\"bg-[#2d5a27] border-[4px] border-black p-4 shadow-[8px_8px_0_0_rgba(0,0,0,1)] text-white flex flex-wrap items-center justify-between gap-4\">
+          <div className=\"flex items-center gap-3\">
+            <Globe className=\"text-yellow-400 animate-spin-slow\" />
+            <h3 className=\"font-black uppercase tracking-tighter text-xl italic\">The_Cooperative_Matrix</h3>
+          </div>
+          <div className=\"flex gap-8\">
+             <div className=\"text-center\">
+                <div className=\"text-[10px] uppercase font-black text-yellow-400\">Total_Knowledge</div>
+                <div className=\"text-2xl font-black italic\">{globalStats.totalReflections.toLocaleString()}</div>
+             </div>
+             <div className=\"text-center\">
+                <div className=\"text-[10px] uppercase font-black text-yellow-400\">Global_Harmony_XP</div>
+                <div className=\"text-2xl font-black italic\">{globalStats.totalXp.toLocaleString()}</div>
+             </div>
+          </div>
+        </div>
+      )}
+
+      <div className=\"bg-white border-[4px] border-black shadow-[8px_8px_0_0_rgba(0,0,0,1)] p-6 flex flex-col md:flex-row items-center gap-8\">
+        <div className=\"w-32 h-32 border-[4px] border-black bg-tertiary-fixed flex items-center justify-center relative overflow-hidden shrink-0\">
+          <img src=\"https://lh3.googleusercontent.com/aida-public/AB6AXuD9zQmmV7bwROQ_onv-VI6iN0jnLUosdnonW1eWD5_-bGjsIbzHWwmn3qyUqcc5nlJcx_1qDrQqzSaNVthXkLm43diIln1AyL1G5nhqKYghyXWMBEfR7_b-51TZ91QLdgT2dtLvpWgmGomW-EFLBewdNg9Hrug6wodkoJYY6WMEKefY-E0mgGBI6Lf-36GgTQv3maazorotCnGs1YaHgeBTpAxcezaHr2pAI1OV8EmtjeU1UB1UJh6qKT2hoTITHm3dyu0NyiQFNJE\" alt=\"Hero Avatar\" className=\"w-full h-full object-cover\" />
+          <div className=\"absolute bottom-0 left-0 w-full bg-black text-white text-center text-[10px] font-black py-1\">LVL {level}</div>
+        </div>
+        <div className=\"flex-1 w-full space-y-4\">
+          <div className=\"flex justify-between items-end\">
+            <h2 className=\"text-4xl md:text-5xl font-black uppercase text-black tracking-tighter\">YOUR_STATS</h2>
+            <span className=\"text-sm font-black text-tertiary\">POINTS: {xp.toLocaleString()} / {xpNext.toLocaleString()}</span>
+          </div>
+          <div className=\"h-10 border-[4px] border-black bg-surface-container flex p-1 gap-1\">
+            {[...Array(10)].map((_, i) => (
+               <div key={i} className={`h-full flex-1 border-r-[2px] border-black last:border-0 ${i < Math.floor((xp % 1000) / 100) ? 'bg-tertiary-container' : 'bg-transparent'}`} />
+            ))}
+          </div>
+          <p className=\"font-bold text-lg text-black uppercase\">TEAMWORK: <span className=\"text-primary font-black animate-pulse\">{reflections.length > 5 ? 'DOING GREAT!' : 'JUST STARTING!'}</span></p>
+        </div>
+      </div>
+
+      <div className=\"grid grid-cols-1 md:grid-cols-12 gap-8\">
+        <div className=\"md:col-span-8 space-y-8\">
+          <Section title=\"HOW_WE ARE_DOING\" titleClassName=\"text-black\">
+            <div className=\"grid grid-cols-1 sm:grid-cols-2 gap-6\">
+              {[{ label: 'KINDNESS', val: stats.kindness, color: 'bg-tertiary-container', textColor: 'text-tertiary' }, { label: 'TRUST', val: stats.trust, color: 'bg-secondary-container', textColor: 'text-secondary' }, { label: 'FUN', val: stats.fun, color: 'bg-primary-container', textColor: 'text-primary' }, { label: 'TEAMWORK', val: stats.teamwork, color: 'bg-black', textColor: 'text-black' },].map((stat) => (
+                <div key={stat.label} className=\"border-[4px] border-black bg-white p-4 flex flex-col gap-2\">
+                  <div className=\"flex justify-between items-center\"><span className=\"font-black text-black uppercase text-sm\">{stat.label}</span><span className={stat.textColor + \" font-black text-sm\"}>{stat.val}%</span></div>
+                  <div className=\"h-4 border-[2px] border-black bg-surface-container flex\"><div className={stat.color + \" h-full\"} style={{ width: `${stat.val}%` }}></div></div>
+                </div>
+              ))}
+            </div>
+          </Section>
+          <div className=\"grid grid-cols-1 sm:grid-cols-2 gap-8\">
+            <div className=\"border-[4px] border-black bg-secondary-fixed p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\"><Lightbulb className=\"text-secondary w-10 h-10 mb-4\" /><div className=\"text-4xl font-black text-black\">{reflections.length}</div><div className=\"font-black text-secondary uppercase text-sm\">IDEAS_FOUND</div></div>
+            <div className=\"border-[4px] border-black bg-tertiary-fixed p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\"><Zap className=\"text-tertiary w-10 h-10 mb-4\" /><div className=\"text-4xl font-black text-black\">{xp / 10}</div><div className=\"font-black text-tertiary uppercase text-sm\">TEAMWORK_LOOPS</div></div>
+          </div>
+        </div>
+        <aside className=\"md:col-span-4 space-y-8\">
+          <div className=\"bg-black text-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\"><h4 className=\"text-2xl font-black uppercase mb-6 text-[#FF0040]\">ACTION_MENU</h4><div className=\"grid gap-4\"><button className=\"w-full bg-[#FF0040] py-4 font-black uppercase flex items-center justify-between\"><span>SYNC_NOW</span><Activity className=\"w-5 h-5\" /></button></div></div>
+          <div className=\"bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\"><h4 className=\"font-black uppercase mb-4 border-b-[4px] border-black pb-2 text-sm\">ACTIVITY_LOG</h4><ul className=\"space-y-3 text-[11px] font-bold\">{recentReflections.map((r, i) => (<li key={i} className=\"flex gap-2\"><span className=\"text-secondary\">[{new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}]</span><span className=\"text-black uppercase line-clamp-1\">{r.theme}_CHECK: {r.input}</span></li>))}</ul></div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+---------------------------------------------------
+FILE: /src/screens/HeuristicsScreen.tsx
+PURPOSE: Displays the active teamwork strategies and psychological heuristics used to boost team performance.
+CODE:
+import { Section } from '../components/layout/Section';
+import { RefreshCw, Verified, Terminal, Users, Share2, Zap, Activity } from 'lucide-react';
+import { cn } from '../lib/utils';
+import { useCIS } from '../state/cisStore';
+
+export default function HeuristicsScreen() {
+  const { getHeuristicModifiers, reflections } = useCIS();
+  const h = getHeuristicModifiers();
+  const strategies = [
+    { id: 'positivity', title: 'Positivity Boost', status: reflections.length > 5 ? 'Active' : 'Locked', icon: RefreshCw, desc: `Current Multiplier: x${h.positivityBoost.toFixed(1)}`, progress: reflections.length > 5 ? 5 : reflections.length, color: 'primary' },
+    { id: 'depth', title: 'Logic Depth', status: reflections.length > 10 ? 'Active' : 'Locked', icon: Verified, desc: `Current Tier: ${h.depthLevel}`, progress: reflections.length > 10 ? 5 : Math.floor(reflections.length / 2), color: 'secondary' },
+    { id: 'sync', title: 'Teamwork Score', status: 'Active', icon: Terminal, desc: `${reflections.length} memory entries.`, progress: Math.min(5, Math.ceil(reflections.length / 3)), color: 'primary' }
   ];
 
-  return titles[Math.min(level - 1, titles.length - 1)];
+  return (
+    <div className=\"space-y-12 pb-20\">
+      <Section title=\"The Heart of the Team\"><h2 className=\"text-4xl font-black uppercase\">The Heart of the Team</h2><p className=\"font-bold uppercase\">Using smart ways to help us work better together.</p></Section>
+      <section className=\"bg-[#2d5a27] border-[4px] border-black p-8 text-white shadow-[12px_12px_0_0_rgba(0,0,0,1)]\"><div className=\"grid grid-cols-1 md:grid-cols-3 gap-8\">{strategies.map((s) => (<div key={s.id} className=\"bg-white border-[4px] border-black p-6 text-black flex flex-col justify-between\"><div><h4 className=\"font-black text-2xl uppercase mb-3\">{s.title}</h4><p className=\"text-zinc-600 font-bold text-xs mb-8 uppercase\">{s.desc}</p></div><div className=\"flex gap-1\">{[...Array(5)].map((_, i) => (<div key={i} className={cn(\"h-4 w-4 border-[2px] border-black\", i < s.progress ? (s.color === 'primary' ? 'bg-tertiary' : 'bg-secondary') : 'bg-zinc-200')}></div>))}</div></div>))}</div></section>
+      <section className=\"grid grid-cols-1 md:grid-cols-4 gap-8\"><div className=\"md:col-span-2 bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\"><h4 className=\"font-black uppercase mb-4 text-sm\">Live Friendship Stream</h4><div className=\"bg-black text-tertiary-fixed font-mono p-4 text-[10px] h-48 overflow-hidden\"><p>&gt; POSITIVITY_BOOST: {h.positivityBoost.toFixed(1)}</p><p>&gt; DEPTH_LEVEL: {h.depthLevel}</p><p>&gt; MEMORY_NODES: {reflections.length}</p></div></div><div className=\"md:col-span-2 grid grid-cols-2 gap-6\"><div className=\"bg-yellow-400 border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\"><Users className=\"w-10 h-10\" /><div className=\"text-3xl font-black\">1.2k</div><div className=\"uppercase text-[10px]\">Team Members</div></div><div className=\"bg-cyan-400 border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\"><Activity className=\"w-10 h-10\" /><div className=\"text-3xl font-black\">84%</div><div className=\"uppercase text-[10px]\">Teamwork Score</div></div></div></section>
+    </div>
+  );
 }
 
 ---------------------------------------------------
-FILE: /.github/workflows/deploy.yml
-PURPOSE: GitHub Pages deployment.
+FILE: /src/screens/MirrorScreen.tsx
+PURPOSE: Interactive interface for sharing reflections and receiving AI-generated feedback.
 CODE:
-name: Deploy static content to Pages
-on:
-  push:
-    branches: ["main"]
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-      - run: npm install
-      - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: './dist'
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+import { useState } from 'react';
+import { Section } from '../components/layout/Section';
+import { useCIS } from '../state/cisStore';
+import { analyzeReflection } from '../lib/ai';
+import { Sparkles, Eye, Terminal } from 'lucide-react';
+import { useFirebase } from '../components/FirebaseProvider';
 
----------------------------------------------------
-FILE: /metadata.json
-PURPOSE: Project metadata and frame permissions.
-CODE:
-{
-  "name": "PLAYER_ONE_COOP",
-  "description": "A collaborative 8-bit cognitive interface system focused on kindness, trust, and teamwork.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone",
-    "geolocation"
-  ]
-}
+export default function MirrorScreen() {
+  const [input, setInput] = useState('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [output, setOutput] = useState<{ reflection: string; question: string; theme: string; } | null>(null);
+  const { user } = useFirebase();
+  const { addReflectionToFirebase, updateXPInFirebase, getHeuristicModifiers } = useCIS();
 
----------------------------------------------------
-FILE: /security_spec.md
-PURPOSE: Security specifications and invariants for the application.
-CODE:
-# Security Specification: PLAYER_ONE_COOP
+  const handleReflect = async () => {
+    if (!input.trim() || !user) return;
+    setIsAnalyzing(true);
+    try {
+      const res = await analyzeReflection(input, getHeuristicModifiers());
+      setOutput(res);
+      await addReflectionToFirebase(user.uid, { input, reflection: res.reflection, question: res.question, theme: res.theme as any });
+      await updateXPInFirebase(user.uid, 50);
+      setInput('');
+    } catch (e) { console.error(e); } finally { setIsAnalyzing(false); }
+  };
 
-1. **Identity Invariant**: A user's data (reflections, profile) is strictly tied to their UID.
-2. **State Invariant**: XP can only be incremented via defined actions (reflections).
-3. **Relation Invariant**: Reflections must belong to the user who created them.
-
----------------------------------------------------
-FILE: /firebase-blueprint.json
-PURPOSE: Data structure definition for Firestore.
-CODE:
-{
-  "entities": {
-    "user": {
-      "title": "User",
-      "properties": {
-        "xp": { "type": "number" },
-        "level": { "type": "number" }
-      }
-    },
-    "reflection": {
-      "title": "Reflection",
-      "properties": {
-        "input": { "type": "string" },
-        "reflection": { "type": "string" },
-        "theme": { "type": "string" }
-      }
-    }
-  },
-  "firestore": {
-    "/users/{userId}": { "schema": "user" },
-    "/users/{userId}/reflections/{id}": { "schema": "reflection" }
-  }
+  return (
+    <div className=\"space-y-8 pb-20\">
+      <Section title=\"FRIENDLY MIRROR\"><div className=\"flex items-center gap-4 mb-4\"><Sparkles className=\"text-tertiary-container w-10 h-10\" /><p className=\"font-bold uppercase\">How are you feeling right now?</p></div></Section>
+      <div className=\"bg-white border-[4px] border-black p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\">
+        <textarea value={input} onChange={e => setInput(e.target.value)} className=\"w-full border-[4px] border-black p-4 font-bold min-h-[120px]\" placeholder=\"Tell me how your day is going!\" />
+        <div className=\"mt-6 flex justify-end\"><button onClick={handleReflect} disabled={isAnalyzing || !input.trim()} className=\"bg-[#e9003a] border-[4px] border-black px-12 py-4 text-white font-black uppercase text-xl shadow-[4px_4px_0_0_rgba(0,0,0,1)]\">{isAnalyzing ? \"THINKING...\" : \"SHARE\"}</button></div>
+      </div>
+      {output && (<div className=\"grid grid-cols-1 md:grid-cols-12 gap-8 animate-in fade-in slide-in-from-bottom-5 duration-500\"><div className=\"md:col-span-8 border-[4px] border-black bg-white p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]\"><div className=\"flex items-center gap-2 mb-4 border-b-[4px] border-black pb-2\"><Eye className=\"w-6 h-6\" /><h3 className=\"text-sm font-black uppercase\">THE MIRROR SAYS...</h3></div><p className=\"font-bold italic text-lg\">{output.reflection}</p></div></div>)}
+    </div>
+  );
 }
