@@ -3,12 +3,12 @@ import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
-  apiKey: "YOUR_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "XXXX",
-  appId: "XXXX"
+  apiKey: "AIzaSyDlvsIeoRNbvsZxBYiQMrwjQFkWT2mqiNg",
+  authDomain: "cooperativeintelligencesystems.firebaseapp.com",
+  projectId: "cooperativeintelligencesystems",
+  storageBucket: "cooperativeintelligencesystems.appspot.com",
+  messagingSenderId: "638085884789",
+  appId: "1:638085884789:web:b1ac76ece8b0b1db9c813c"
 };
 
 const app = initializeApp(firebaseConfig);
