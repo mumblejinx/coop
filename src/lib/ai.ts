@@ -1,24 +1,43 @@
-export interface AIResponse {
-  reflection: string;
-  theme: 'kindness' | 'trust' | 'fun' | 'teamwork';
-  question: string;
+export async function analyzeReflection(input: string, modifiers: any, mode: 'conversation' | 'story') {
+
+  const prompt = `
+You are an intelligent AI system operating in ${mode} mode.
+
+USER INPUT:
+"${input}"
+
+INSTRUCTIONS:
+
+If mode = conversation:
+- Reflect the user's thoughts emotionally and intelligently
+- Keep it concise (1–2 sentences)
+- Ask a NATURAL follow-up question
+- Vary your phrasing
+- DO NOT repeat generic questions
+
+If mode = story:
+- Continue a narrative based on the user's input
+- Add detail, tension, or curiosity
+- Make the user feel inside a world
+- End with a question about what they do next
+
+Avoid repetition.
+
+Return ONLY valid JSON:
+
+{
+  "reflection": "...",
+  "question": "...",
+  "theme": "growth | fear | connection | identity | purpose | curiosity | conflict"
 }
+`;
 
-export async function analyzeReflection(input: string, context: { positivityBoost: number; depthLevel: number }): Promise<AIResponse> {
-  const themes: ('kindness' | 'trust' | 'fun' | 'teamwork')[] = ['kindness', 'trust', 'fun', 'teamwork'];
-  const theme = themes[Math.floor(Math.random() * themes.length)];
-  
-  let reflection = `I hear you: "${input}". It sounds like you're processing something meaningful.`;
-  if (context.positivityBoost > 1) {
-    reflection += " I'm really glad we're sharing this together!";
-  }
-  
-  let question = 'What part of this matters most to you right now?';
-  if (context.depthLevel > 1) {
-    question = 'If you could see this through the eyes of a teammate, how would they help you navigate it?';
-  }
+  const response = await fetch('/api/ai', {
+    method: 'POST',
+    body: JSON.stringify({ prompt })
+  });
 
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  const data = await response.json();
 
-  return { reflection, theme, question };
+  return data;
 }
