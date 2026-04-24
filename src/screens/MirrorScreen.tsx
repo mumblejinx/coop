@@ -17,7 +17,7 @@ export default function MirrorScreen() {
   const [input, setInput] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [currentAI, setCurrentAI] = useState<{ reflection: string; question: string } | null>(null);
+  const [currentAI, setCurrentAI] = useState<{ reflection: string; question: string; theme: string } | null>(null);
 
   const { user } = useFirebase();
   const { addReflectionToFirebase, updateXPInFirebase, getHeuristicModifiers } = useCIS();
@@ -51,7 +51,7 @@ export default function MirrorScreen() {
 
       await updateXPInFirebase(user.uid, 50);
 
-      // ✅ CLEAR INPUT AFTER SUBMIT
+      // clear input
       setInput('');
 
     } catch (e) {
@@ -87,14 +87,16 @@ export default function MirrorScreen() {
         </Section>
       )}
 
-      {/* ACTIVE MODE */}
+      {/* MAIN INTERACTION */}
       {mode && (
         <>
           <Section title="MIRROR">
             <div className="flex items-center gap-4 mb-4">
               <Sparkles className="w-8 h-8" />
               <p className="font-bold uppercase">
-                {currentAI ? currentAI.reflection : "Begin your interaction..."}
+                {currentAI
+                  ? currentAI.reflection
+                  : "How are you feeling right now, or what would you like to explore?"}
               </p>
             </div>
 
@@ -124,6 +126,23 @@ export default function MirrorScreen() {
               </button>
             </div>
           </div>
+
+          {/* THEME + SYSTEM */}
+          {currentAI && (
+            <div className="space-y-4">
+
+              <div className="bg-yellow-400 border-[4px] border-black p-4 font-black uppercase">
+                Theme Detected: {currentAI.theme}
+              </div>
+
+              <div className="bg-black text-white border-[4px] border-black p-4 font-mono text-xs">
+                <p>&gt; Memory Stored</p>
+                <p>&gt; Interaction Logged</p>
+                <p>&gt; System Stable</p>
+              </div>
+
+            </div>
+          )}
 
           {/* TRANSCRIPT */}
           <div className="bg-black text-white border-[4px] border-black p-6 h-64 overflow-y-auto">

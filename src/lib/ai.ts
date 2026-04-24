@@ -6,10 +6,19 @@ interface AIResponse {
   theme: string;
 }
 
-// simple persistent story state (module-level)
+// prevent repeated questions
+let lastQuestion = "";
+
+function getVariedQuestion(options: string[]) {
+  const filtered = options.filter(q => q !== lastQuestion);
+  const choice = filtered[Math.floor(Math.random() * filtered.length)];
+  lastQuestion = choice;
+  return choice;
+}
+
+// simple story state
 let storyState = {
-  started: false,
-  location: 'unknown'
+  started: false
 };
 
 export async function analyzeReflection(
@@ -22,35 +31,61 @@ export async function analyzeReflection(
 
   let reflection = '';
   let question = '';
-  let theme = 'reflection';
+  let theme = 'general';
 
   // =========================
   // 🧠 CONVERSATION MODE
   // =========================
   if (mode === 'conversation') {
 
-    if (lower.includes('good') || lower.includes('nice') || lower.includes('happy')) {
-      reflection = `That sounds like a genuinely good moment. There’s a bit of ease in what you’re describing.`;
-      question = `What’s been contributing most to that feeling?`;
-      theme = 'positivity';
-    }
+    const responses = [
+      {
+        check: ['good', 'nice', 'happy'],
+        reflection: `That sounds like a genuinely good moment.`,
+        questions: [
+          "What’s been contributing to that?",
+          "What part of your day made it feel that way?",
+          "Do you want more days like this?"
+        ],
+        theme: 'positivity'
+      },
+      {
+        check: ['stress', 'anxious', 'worried'],
+        reflection: `It sounds like something is weighing on you.`,
+        questions: [
+          "What feels most difficult right now?",
+          "What’s causing the most pressure?",
+          "What would help even a little?"
+        ],
+        theme: 'stress'
+      },
+      {
+        check: ['bathroom'],
+        reflection: `You're balancing something immediate with curiosity.`,
+        questions: [
+          "What made you stay instead of stepping away?",
+          "What feels more important right now?"
+        ],
+        theme: 'conflict'
+      }
+    ];
 
-    else if (lower.includes('stress') || lower.includes('anxious') || lower.includes('worried')) {
-      reflection = `It sounds like something is weighing on you a bit.`;
-      question = `What part of it feels most difficult right now?`;
-      theme = 'stress';
-    }
+    const match = responses.find(r =>
+      r.check.some(word => lower.includes(word))
+    );
 
-    else if (lower.includes('bathroom')) {
-      reflection = `It sounds like you're balancing something immediate with curiosity.`;
-      question = `What made you stay here instead of stepping away for a moment?`;
-      theme = 'conflict';
-    }
-
-    else {
-      reflection = `I’m hearing something worth paying attention to in what you said.`;
-      question = `What part of that stands out to you the most right now?`;
-      theme = 'general';
+    if (match) {
+      reflection = match.reflection;
+      question = getVariedQuestion(match.questions);
+      theme = match.theme;
+    } else {
+      reflection = `You're noticing something about your experience right now.`;
+      question = getVariedQuestion([
+        "What stands out most to you?",
+        "What feels important right now?",
+        "What are you paying attention to?"
+      ]);
+      theme = 'reflection';
     }
   }
 
@@ -59,48 +94,59 @@ export async function analyzeReflection(
   // =========================
   if (mode === 'story') {
 
-    // First turn (initialize world)
     if (!storyState.started) {
       storyState.started = true;
-      storyState.location = 'room';
 
-      reflection = `You open your eyes and find yourself in a dimly lit room. The walls are unfamiliar. A faint humming sound vibrates through the space.`;
+      reflection = `You wake up in a dimly lit room. A metal door stands to one side. Strange markings cover the wall. A low hum fills the air.`;
 
-      question = `Do you explore the room or try to find a way out?`;
+      question = "Do you look around, inspect the markings, or go to the door?";
       theme = 'mystery';
     }
 
-    else if (lower.includes('look') || lower.includes('around')) {
-      reflection = `You scan the room carefully. There’s a metal door, a flickering overhead light, and strange markings scratched into one wall.`;
+    else if (lower.includes('look')) {
+      reflection = `You scan the room. The light flickers overhead. The markings look intentional — not random.`;
 
-      question = `Do you inspect the markings or approach the door?`;
+      question = "Do you inspect the markings or approach the door?";
       theme = 'observation';
     }
 
-    else if (lower.includes('door')) {
-      reflection = `You move toward the door. As you get closer, the humming grows louder—like something is responding to your presence.`;
+    else if (lower.includes('mark')) {
+      reflection = `The markings form a pattern. It feels like a warning — or instructions.`;
 
-      question = `Do you open the door or step back?`;
+      question = "Do you try to decode it or ignore it?";
+      theme = 'mystery';
+    }
+
+    else if (lower.includes('door')) {
+      reflection = `You move toward the door. The humming grows louder, reacting to you.`;
+
+      question = "Do you open it or step back?";
       theme = 'tension';
     }
 
-    else if (lower.includes('mark') || lower.includes('wall')) {
-      reflection = `The markings seem deliberate. They form a pattern… not random. It almost feels like a warning.`;
+    else if (lower.includes('who') || lower.includes('call')) {
+      reflection = `Your voice echoes. Silence… then something shifts behind the door.`;
 
-      question = `Do you try to understand the pattern or ignore it?`;
+      question = "Do you move toward the sound or stay still?";
+      theme = 'tension';
+    }
+
+    else if (lower.includes('what') || lower.includes('where')) {
+      reflection = `You try to understand your surroundings, but something feels intentionally unclear.`;
+
+      question = "What do you focus on next?";
       theme = 'mystery';
     }
 
     else {
-      reflection = `Your action shifts something subtle in the environment. You get the sense that you're not alone here.`;
+      reflection = `You hesitate. The room remains still, but the hum continues.`;
 
-      question = `What do you do next?`;
+      question = "Do you act or wait?";
       theme = 'unknown';
     }
   }
 
-  // simulate delay
-  await new Promise(res => setTimeout(res, 600));
+  await new Promise(res => setTimeout(res, 500));
 
   return { reflection, question, theme };
 }
