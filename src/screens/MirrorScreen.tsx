@@ -2,18 +2,21 @@ import { useState } from 'react';
 import { Section } from '../components/layout/Section';
 import { useCIS } from '../state/cisStore';
 import { analyzeReflection } from '../lib/ai';
-import { Sparkles, Eye, Brain, Zap } from 'lucide-react';
+import { Sparkles, Brain, Terminal } from 'lucide-react';
 import { useFirebase } from '../components/FirebaseProvider';
+
+interface Turn {
+  input: string;
+  reflection: string;
+  question: string;
+  theme: string;
+}
 
 export default function MirrorScreen() {
   const [input, setInput] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [output, setOutput] = useState<{
-    reflection: string;
-    question: string;
-    theme: string;
-  } | null>(null);
-  const [xpGained, setXpGained] = useState<number | null>(null);
+  const [currentTurn, setCurrentTurn] = useState<Turn | null>(null);
+  const [history, setHistory] = useState<Turn[]>([]);
 
   const { user } = useFirebase();
   const {
@@ -26,18 +29,22 @@ export default function MirrorScreen() {
     if (!input.trim() || !user) return;
 
     setIsAnalyzing(true);
-    setXpGained(null);
 
     try {
       const res = await analyzeReflection(input, getHeuristicModifiers());
 
-      console.log("AI RESPONSE:", res);
+      const turn: Turn = {
+        input,
+        reflection: res.reflection,
+        question: res.question,
+        theme: res.theme
+      };
 
-      // 🔥 Show result immediately (fixes frozen UI)
-      setOutput(res);
+      setCurrentTurn(turn);
+      setHistory(prev => [...prev, turn]);
+
       setIsAnalyzing(false);
 
-      // 🔁 Background work (doesn't block UI)
       await addReflectionToFirebase(user.uid, {
         input,
         reflection: res.reflection,
@@ -47,11 +54,10 @@ export default function MirrorScreen() {
 
       await updateXPInFirebase(user.uid, 50);
 
-      setXpGained(50);
       setInput('');
 
     } catch (e) {
-      console.error("Mirror error:", e);
+      console.error(e);
       setIsAnalyzing(false);
     }
   };
@@ -59,14 +65,26 @@ export default function MirrorScreen() {
   return (
     <div className="space-y-8 pb-20">
 
-      {/* HEADER */}
-      <Section title="FRIENDLY MIRROR">
-        <div className="flex items-center gap-4 mb-4">
-          <Sparkles className="text-tertiary-container w-10 h-10" />
-          <p className="font-bold uppercase">
-            How are you feeling right now?
-          </p>
-        </div>
+      {/* 🔁 DYNAMIC TOP BOX */}
+      <Section title="MIRROR DIALOGUE">
+        {!currentTurn ? (
+          <div className="flex items-center gap-4">
+            <Sparkles className="w-8 h-8" />
+            <p className="font-bold uppercase">
+              How are you feeling right now?
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="font-bold italic text-lg">
+              {currentTurn.reflection}
+            </p>
+            <div className="border-t-2 border-black pt-3">
+              <p className="font-black uppercase text-sm">Next Move</p>
+              <p className="font-bold">{currentTurn.question}</p>
+            </div>
+          </div>
+        )}
       </Section>
 
       {/* INPUT */}
@@ -75,75 +93,66 @@ export default function MirrorScreen() {
           value={input}
           onChange={e => setInput(e.target.value)}
           className="w-full border-[4px] border-black p-4 font-bold min-h-[120px]"
-          placeholder="Tell me how your day is going..."
+          placeholder="Respond or continue the story..."
         />
 
         <div className="mt-6 flex justify-end">
           <button
             onClick={handleReflect}
             disabled={isAnalyzing || !input.trim()}
-            className="bg-[#e9003a] border-[4px] border-black px-12 py-4 text-white font-black uppercase text-xl shadow-[4px_4px_0_0_rgba(0,0,0,1)]"
+            className="bg-[#e9003a] border-[4px] border-black px-12 py-4 text-white font-black uppercase text-xl"
           >
-            {isAnalyzing ? "THINKING..." : "SHARE"}
+            {isAnalyzing ? "THINKING..." : "RESPOND"}
           </button>
         </div>
       </div>
 
-      {/* OUTPUT (GAME TURN RESULT) */}
-      {output && (
-        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-5 duration-500">
-
-          {/* AI REFLECTION */}
-          <div className="border-[4px] border-black bg-white p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
-            <div className="flex items-center gap-2 mb-4 border-b-[4px] border-black pb-2">
-              <Eye className="w-6 h-6" />
-              <h3 className="text-sm font-black uppercase">
-                THE MIRROR SAYS...
-              </h3>
-            </div>
-            <p className="font-bold italic text-lg">
-              {output.reflection}
-            </p>
+      {/* THEME */}
+      {currentTurn && (
+        <div className="border-[4px] border-black bg-yellow-400 p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
+          <div className="flex items-center gap-2 mb-2">
+            <Brain className="w-5 h-5" />
+            <span className="font-black uppercase text-sm">
+              Theme Detected
+            </span>
           </div>
-
-          {/* THEME IMPACT */}
-          <div className="border-[4px] border-black bg-yellow-400 p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
-            <div className="flex items-center gap-2 mb-2">
-              <Brain className="w-5 h-5" />
-              <span className="font-black uppercase text-sm">
-                Theme Detected
-              </span>
-            </div>
-            <div className="text-2xl font-black uppercase">
-              {output.theme}
-            </div>
+          <div className="text-2xl font-black uppercase">
+            {currentTurn.theme}
           </div>
+        </div>
+      )}
 
-          {/* SYSTEM FEEDBACK */}
-          <div className="border-[4px] border-black bg-black text-green-400 p-6 font-mono text-sm shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
-            <p>&gt; MEMORY STORED</p>
-            <p>&gt; TRUST NETWORK UPDATED</p>
-            <p>&gt; PATTERN RECOGNITION ACTIVE</p>
+      {/* SYSTEM */}
+      {currentTurn && (
+        <div className="border-[4px] border-black bg-black text-green-400 p-6 font-mono text-sm shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
+          <p>&gt; MEMORY STORED</p>
+          <p>&gt; TRUST NETWORK UPDATED</p>
+          <p>&gt; PATTERN RECOGNITION ACTIVE</p>
+        </div>
+      )}
+
+      {/* 📜 TRANSCRIPT */}
+      {history.length > 0 && (
+        <div className="border-[4px] border-black bg-white p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)] max-h-64 overflow-y-auto">
+          <h3 className="font-black uppercase mb-4">
+            Transcript
+          </h3>
+
+          <div className="space-y-4 text-sm">
+            {history.map((turn, i) => (
+              <div key={i} className="border-b pb-2">
+                <p className="font-bold">You:</p>
+                <p>{turn.input}</p>
+
+                <p className="font-bold mt-2">Mirror:</p>
+                <p>{turn.reflection}</p>
+
+                <p className="italic text-xs mt-1">
+                  → {turn.question}
+                </p>
+              </div>
+            ))}
           </div>
-
-          {/* NEXT PROMPT (GAME LOOP) */}
-          <div className="border-[4px] border-black bg-white p-6 shadow-[8px_8px_0_0_rgba(0,0,0,1)]">
-            <h3 className="font-black uppercase mb-2">
-              NEXT MOVE
-            </h3>
-            <p className="font-bold">
-              {output.question}
-            </p>
-          </div>
-
-          {/* XP FEEDBACK */}
-          {xpGained && (
-            <div className="flex items-center gap-2 text-green-400 font-black animate-bounce">
-              <Zap className="w-5 h-5" />
-              +{xpGained} XP
-            </div>
-          )}
-
         </div>
       )}
     </div>
